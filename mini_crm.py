@@ -72,9 +72,8 @@ def fetch_siret_data(siret):
 
 def get_geo_links(adresse):
     """
-    Génère deux liens :
-    1. Géoportail "Safe Mode" (Juste les coordonnées, pas de couches qui font planter).
-    2. Google Maps (Satellite) en secours.
+    Génère les liens cartographiques.
+    Géoportail : Fond PLAN IGN Classique (GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2).
     """
     if not adresse:
         return None, None
@@ -88,15 +87,14 @@ def get_geo_links(adresse):
         
         if data.get("features"):
             coords = data["features"][0]["geometry"]["coordinates"]
-            lon = round(coords[0], 4)
-            lat = round(coords[1], 4)
+            lon = round(coords[0], 5)
+            lat = round(coords[1], 5)
             
-            # LIEN 1 : GEOPORTAIL (Mode minimaliste pour éviter l'écran gris)
-            # On retire l0 et l1. On garde juste le centrage (?c=) et le zoom (?z=)
-            link_geo = f"https://www.geoportail.gouv.fr/carte?c={lon},{lat}&z=17"
+            # LIEN 1 : GEOPORTAIL (PLAN IGN STANDARD)
+            # l0=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2(100) -> C'est le fond de carte classique
+            link_geo = f"https://www.geoportail.gouv.fr/carte?c={lon},{lat}&z=18&l0=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2(100)"
             
-            # LIEN 2 : GOOGLE MAPS (Satellite)
-            # t=k active la vue Satellite (k=hYbrid en réalité)
+            # LIEN 2 : GOOGLE MAPS (Satellite) - On le garde en secours
             link_gmaps = f"https://www.google.com/maps?q={lat},{lon}&t=k"
             
             return link_geo, link_gmaps
@@ -104,7 +102,6 @@ def get_geo_links(adresse):
         return None, None
     return None, None
 
-# ... (Fonctions DB inchangées : ajouter_client, sauvegarder_fichiers, etc.) ...
 def ajouter_client(data, fichiers_uploades):
     caract_remplies = {k: v for k, v in data['caracteristiques'].items() if v}
     caract_json = json.dumps(caract_remplies) if caract_remplies else None
@@ -218,7 +215,7 @@ def is_valid_email(email_str):
     return bool(re.match(r"[^@]+@[^@]+\.[^@]+", email_str))
 
 # --- INTERFACE ---
-st.set_page_config(page_title="CRM V14 - Stable", layout="wide")
+st.set_page_config(page_title="CRM V16 - Plan IGN", layout="wide")
 if 'reset_needed' not in st.session_state: st.session_state['reset_needed'] = False
 clear_form_logic() 
 
@@ -247,9 +244,7 @@ with st.sidebar:
         link_geo, link_gmaps = get_geo_links(addr_travaux)
         if link_geo:
             col_btn1, col_btn2 = st.columns(2)
-            # Bouton 1 : Geoportail Normal (Sans layers pour éviter le crash)
-            col_btn1.link_button("🗺️ Géoportail", link_geo, help="Ouvre Géoportail centré. Sélectionnez 'Cadastre' dans les couches.")
-            # Bouton 2 : Google Maps (Secours)
+            col_btn1.link_button("🗺️ Géoportail", link_geo, help="Plan IGN Standard")
             col_btn2.link_button("🛰️ Google Maps", link_gmaps, help="Vue Satellite Google")
         else:
             st.caption("⚠️ Adresse non localisée.")
@@ -275,7 +270,6 @@ with st.sidebar:
         if not nom_in: st.error("Nom obligatoire.")
         elif not is_valid_email(st.session_state.get("w_email")): st.error("Email invalide.")
         else:
-            # (Logique sauvegarde identique...)
             surf_val = str(st.session_state.get("w_surf")) if st.session_state.get("w_surf") > 0 else ""
             haut_val = str(st.session_state.get("w_haut")) if st.session_state.get("w_haut") > 0 else ""
             puis_val = str(st.session_state.get("w_ecl_puis")) if st.session_state.get("w_ecl_puis") > 0 else ""
@@ -296,11 +290,15 @@ with st.sidebar:
 
 # --- TABS ---
 tab1, tab2 = st.tabs(["📊 Tableau de Bord", "📁 Gestion"])
+
 with tab1:
     st.title("Suivi Clients (Cloud)")
     search = st.text_input("Filtrer...", placeholder="Nom, Ville...")
+    if 'refresh' not in st.session_state: st.session_state['refresh'] = False
+    
     df = get_dataframe(search)
     st.session_state['df_view'] = df
+
     if not df.empty:
         col_conf = {"Statut": st.column_config.SelectboxColumn(options=["Nouveau", "Contacté", "Devis envoyé", "En négo", "Signé", "Perdu"], required=True)}
         st.data_editor(df, column_config=col_conf, disabled=[c for c in df.columns if c != "Statut"], hide_index=True, use_container_width=True, height=600, key="main_editor", on_change=update_from_editor)
@@ -308,51 +306,101 @@ with tab1:
 
 with tab2:
     st.header("Gestion Avancée")
-    opts = {c.id: f"{c.nom} {c.prenom or ''}" for c in session.query(ClientModel).all()}
-    sel_id = st.selectbox("Client :", options=opts.keys(), format_func=lambda x: opts[x]) if opts else None
+    all_clients = session.query(ClientModel).all()
+    opts = {c.id: f"{c.nom} {c.prenom or ''} ({c.entreprise or 'Indiv'})" for c in all_clients}
+    sel_id = st.selectbox("Sélectionner le client à gérer :", options=opts.keys(), format_func=lambda x: opts[x]) if opts else None
     
     if sel_id:
         c_edit = session.query(ClientModel).get(sel_id)
-        with st.expander("Modifier", expanded=True):
+        
+        with st.expander("Modifier les informations", expanded=True):
             with st.form("edit_form"):
-                e_nom = st.text_input("Nom", value=c_edit.nom or "")
-                # ... (Reste des champs identique au code précédent)
+                st.subheader("Contact")
+                c_nom, c_pre = st.columns(2)
+                e_nom = c_nom.text_input("Nom", value=c_edit.nom or "")
+                e_pre = c_pre.text_input("Prénom", value=c_edit.prenom or "")
+                e_email = st.text_input("Email", value=c_edit.email or "")
+                e_tel = st.text_input("Tél", value=c_edit.telephone or "")
+                
+                st.subheader("Entreprise")
+                e_ent = st.text_input("Entreprise", value=c_edit.entreprise or "")
+                e_siret = st.text_input("SIRET", value=c_edit.siret or "", max_chars=14)
+                e_kbis = st.text_input("Adresse Siège", value=c_edit.adresse_kbis or "")
                 e_trav = st.text_input("Adresse Travaux", value=c_edit.adresse_travaux or "")
+                
+                st.subheader("Technique & Comptage")
+                def safe_int(val):
+                    try: return int(float(val))
+                    except: return 0
+
+                c_tech1, c_tech2 = st.columns(2)
+                e_nb = c_tech1.number_input("Nb Actuel", value=safe_int(c_edit.nb_eclairage))
+                e_nb_led = c_tech2.number_input("Nb LEDs Préco", value=safe_int(c_edit.nb_leds_preconise))
+                
+                e_note = st.text_area("Note", value=c_edit.note or "")
+                
                 if st.form_submit_button("💾 Mettre à jour"):
-                     # ... (Logique update identique)
-                     c_edit.nom = e_nom
-                     # ...
-                     session.commit()
-                     st.success("OK")
-                     st.session_state['refresh'] = True
-                     st.rerun()
-            
-            # Boutons Geoportail aussi dans l'onglet Gestion
+                    if not e_nom: st.error("Nom requis.")
+                    elif not is_valid_email(e_email): st.error("Email invalide.")
+                    elif not is_valid_phone(e_tel): st.error("Tel invalide.")
+                    else:
+                        cl_tel = re.sub(r'[\s\-\.]', '', e_tel) if e_tel else ""
+                        c_edit.entreprise = e_ent
+                        c_edit.nom = e_nom
+                        c_edit.prenom = e_pre
+                        c_edit.siret = e_siret
+                        c_edit.email = e_email
+                        c_edit.telephone = cl_tel
+                        c_edit.adresse_kbis = e_kbis
+                        c_edit.adresse_travaux = e_trav
+                        c_edit.nb_eclairage = str(e_nb)
+                        c_edit.nb_leds_preconise = str(e_nb_led)
+                        c_edit.note = e_note
+                        session.commit()
+                        st.success("Infos mises à jour !")
+                        st.session_state['refresh'] = True
+                        st.rerun()
+
+            # BOUTONS CARTES (HORS FORMULAIRE POUR ETRE CLIQUABLES)
             if e_trav:
                 lg, lgm = get_geo_links(e_trav)
                 if lg:
+                    st.caption("Localisation :")
                     c1, c2 = st.columns(2)
-                    c1.link_button("🗺️ Géoportail", lg)
-                    c2.link_button("🛰️ Google Maps", lgm)
+                    c1.link_button("🗺️ Géoportail", lg, help="Plan IGN Standard")
+                    c2.link_button("🛰️ Google Maps", lgm, help="Vue Satellite Google")
 
-        # Gestion fichiers (identique)...
-        col_f, col_a = st.columns(2)
-        with col_f:
-             if c_edit.fichiers:
-                 for f in c_edit.fichiers:
-                     st.markdown(f"📄 [{f.nom_fichier}]({f.url_public})")
-                     if st.button("❌", key=f"d_{f.id}"): 
-                         supprimer_un_fichier(f.id)
-                         st.session_state['refresh'] = True
-                         st.rerun()
-        with col_a:
-             nf = st.file_uploader("Ajout", accept_multiple_files=True, key="up_m")
-             if st.button("Envoyer") and nf:
-                 sauvegarder_fichiers(c_edit.id, nf)
-                 st.session_state['refresh'] = True
-                 st.rerun()
+        st.divider()
+        # --- GESTION FICHIERS ---
+        col_fichiers, col_ajout = st.columns([1, 1])
         
-        if st.button("🗑 SUPPRIMER", type="primary"):
+        with col_fichiers:
+            st.subheader("Fichiers")
+            if c_edit.fichiers:
+                for f in c_edit.fichiers:
+                    c1, c2, c3 = st.columns([4, 2, 1])
+                    c1.text(f"📄 {f.nom_fichier}")
+                    # Lien de téléchargement
+                    c2.markdown(f"[⬇️ Ouvrir]({f.url_public})")
+                    if c3.button("❌", key=f"del_{f.id}"):
+                        supprimer_un_fichier(f.id)
+                        st.session_state['refresh'] = True
+                        st.rerun()
+            else:
+                st.caption("Aucun fichier")
+
+        with col_ajout:
+            st.subheader("Ajout")
+            new_files = st.file_uploader("Upload", accept_multiple_files=True, key="new_uploads_manage")
+            if st.button("Envoyer"):
+                if new_files:
+                    sauvegarder_fichiers(c_edit.id, new_files)
+                    st.success("Ajouté !")
+                    st.session_state['refresh'] = True
+                    st.rerun()
+
+        st.divider()
+        if st.button("🗑 SUPPRIMER CLIENT", type="primary"):
             supprimer_client_entier(c_edit.id)
             st.session_state['refresh'] = True
             st.rerun()
