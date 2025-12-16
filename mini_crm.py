@@ -81,12 +81,13 @@ def fetch_siret_data(siret):
 
 def get_geoportail_link(adresse):
     """
-    Génère un lien vers le Géoportail de l'Urbanisme (Beaucoup plus stable pour le cadastre).
+    Génère un lien pour le Géoportail "Normal" (Version corrigée).
+    Arrondit les coordonnées pour éviter le bug de l'écran gris.
     """
     if not adresse:
         return None
     
-    # 1. API Adresse (BAN)
+    # 1. On interroge l'API Adresse
     base_api = "https://api-adresse.data.gouv.fr/search/"
     params = {"q": adresse, "limit": 1}
     
@@ -96,21 +97,20 @@ def get_geoportail_link(adresse):
         
         if data.get("features"):
             coords = data["features"][0]["geometry"]["coordinates"]
-            # L'API renvoie [Longitude, Latitude]
-            lon = coords[0]
-            lat = coords[1]
             
-            # 2. Construction URL Géoportail de l'Urbanisme
-            # C'est le visualiseur PRO : il ne plante pas sur les coordonnées.
-            # tile=1 : Fond de plan (Plan IGN/Cadastre)
-            # zoom=17 : Zoom niveau parcelle
-            base_url = "https://www.geoportail-urbanisme.gouv.fr/map/"
+            # --- LA CORRECTION EST ICI ---
+            # On arrondit à 4 décimales (précision ~11 mètres), ce qui suffit
+            # largement pour centrer la carte mais évite de faire planter Géoportail.
+            lon = round(coords[0], 4)
+            lat = round(coords[1], 4)
             
-            # On force le point comme séparateur décimal pour être sûr
-            slon = str(lon).replace(',', '.')
-            slat = str(lat).replace(',', '.')
+            # 2. Construction URL Géoportail Classique
+            base_geo = "https://www.geoportail.gouv.fr/carte"
             
-            link = f"{base_url}#tile=1&lon={slon}&lat={slat}&zoom=18"
+            # z=17 : Zoom stable
+            # l0 : Satellite (100%)
+            # l1 : Cadastre (75% pour voir à travers)
+            link = f"{base_geo}?c={lon},{lat}&z=17&l0=ORTHOIMAGERY.ORTHOPHOTOS(100)&l1=CADASTRALPARCELS.PARCELS(75)&permalink=yes"
             return link
     except:
         return None
