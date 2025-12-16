@@ -314,3 +314,132 @@ with st.sidebar:
         if not nom_in: st.error("Nom obligatoire.")
         elif not is_valid_email(st.session_state.get("w_email")): st.error("Email invalide.")
         else:
+            surf_val = str(st.session_state.get("w_surf")) if st.session_state.get("w_surf") > 0 else ""
+            haut_val = str(st.session_state.get("w_haut")) if st.session_state.get("w_haut") > 0 else ""
+            puis_val = str(st.session_state.get("w_ecl_puis")) if st.session_state.get("w_ecl_puis") > 0 else ""
+            
+            caracs = {"Superficie (m²)": surf_val, "Hauteur (m)": haut_val, "Type Éclairage": st.session_state.get("w_ecl_type"), "Puissance (W)": puis_val}
+            data_client = {
+                "nom": nom_in, "prenom": st.session_state.get("w_prenom"), "entreprise": st.session_state.get("w_ent"),
+                "siret": st.session_state.get("w_siret_valide"), "email": st.session_state.get("w_email"),
+                "telephone": re.sub(r'[\s\-\.]', '', st.session_state.get("w_tel") or ""),
+                "adresse_kbis": st.session_state.get("w_kbis"), "adresse_travaux": st.session_state.get("w_travaux"),
+                "nb_eclairage": st.session_state.get("w_nbecl"), "nb_leds_preconise": st.session_state.get("w_nbled"),
+                "note": st.session_state.get("w_note"), "caracteristiques": caracs
+            }
+            
+            uploads_dict = {
+                "Devis Signé": up_devis,
+                "Captures Géoportail": up_geo,
+                "Photos Local": up_photos,
+                "Pièces Supplémentaires": up_supp
+            }
+            
+            ajouter_client(data_client, uploads_dict)
+            st.session_state['reset_needed'] = True
+            st.success("Sauvegardé !")
+            st.session_state['refresh'] = True
+            st.rerun()
+
+# --- TABS ---
+tab1, tab2 = st.tabs(["📊 Tableau de Bord", "📁 Gestion"])
+
+with tab1:
+    st.title("Suivi Clients (Cloud)")
+    search = st.text_input("Filtrer...", placeholder="Nom, Ville...")
+    if 'refresh' not in st.session_state: st.session_state['refresh'] = False
+    
+    df = get_dataframe(search)
+    st.session_state['df_view'] = df
+
+    if not df.empty:
+        col_conf = {"Statut": st.column_config.SelectboxColumn(options=["Nouveau", "Contacté", "Devis envoyé", "En négo", "Signé", "Perdu"], required=True)}
+        st.data_editor(df, column_config=col_conf, disabled=[c for c in df.columns if c != "Statut"], hide_index=True, use_container_width=True, height=600, key="main_editor", on_change=update_from_editor)
+    else: st.info("Vide.")
+
+with tab2:
+    st.header("Gestion Avancée")
+    all_clients = session.query(ClientModel).all()
+    opts = {c.id: f"{c.nom} {c.prenom or ''} ({c.entreprise or 'Indiv'})" for c in all_clients}
+    sel_id = st.selectbox("Sélectionner le client à gérer :", options=opts.keys(), format_func=lambda x: opts[x]) if opts else None
+    
+    if sel_id:
+        c_edit = session.query(ClientModel).get(sel_id)
+        
+        with st.expander("Modifier les informations", expanded=False):
+            with st.form("edit_form"):
+                e_nom = st.text_input("Nom", value=c_edit.nom or "")
+                e_pre = st.text_input("Prénom", value=c_edit.prenom or "")
+                e_email = st.text_input("Email", value=c_edit.email or "")
+                e_tel = st.text_input("Tél", value=c_edit.telephone or "")
+                e_ent = st.text_input("Entreprise", value=c_edit.entreprise or "")
+                e_siret = st.text_input("SIRET", value=c_edit.siret or "")
+                e_kbis = st.text_input("Adresse Siège", value=c_edit.adresse_kbis or "")
+                e_trav = st.text_input("Adresse Travaux", value=c_edit.adresse_travaux or "")
+                e_note = st.text_area("Note", value=c_edit.note or "")
+                
+                if st.form_submit_button("💾 Mettre à jour"):
+                    c_edit.nom = e_nom; c_edit.prenom = e_pre; c_edit.email = e_email; c_edit.telephone = e_tel
+                    c_edit.entreprise = e_ent; c_edit.siret = e_siret; c_edit.adresse_kbis = e_kbis
+                    c_edit.adresse_travaux = e_trav; c_edit.note = e_note
+                    session.commit()
+                    st.success("Mis à jour")
+                    st.session_state['refresh'] = True
+                    st.rerun()
+
+        st.divider()
+        st.subheader("Fichiers & Fusion")
+        
+        # VERIFICATION
+        is_complet = verifier_categories_completes(c_edit.id)
+        
+        if is_complet:
+            st.success("🌟 Dossier complet ! (Devis + Géoportail + Photos présents)")
+            if st.button("📑 GÉNÉRER ET TÉLÉCHARGER LE DOSSIER PDF COMPLET"):
+                with st.spinner("Fusion des documents et images en cours..."):
+                    pdf_bytes = generer_pdf_fusionne(c_edit.id)
+                    if pdf_bytes:
+                        st.download_button(
+                            label="⬇️ Télécharger le Dossier Fusionné (.pdf)",
+                            data=pdf_bytes,
+                            file_name=f"Dossier_Complet_{c_edit.nom}.pdf",
+                            mime="application/pdf"
+                        )
+                    else:
+                        st.error("Erreur lors de la génération. Vérifiez que les fichiers sont bien des PDF ou Images valides.")
+        else:
+            st.info("💡 Pour activer la fusion PDF, il faut au moins un fichier dans : Devis, Géoportail et Photos.")
+
+        # AFFICHAGE PAR CATEGORIES
+        categories_ordre = ["Devis Signé", "Captures Géoportail", "Photos Local", "Pièces Supplémentaires"]
+        
+        for cat in categories_ordre:
+            with st.expander(f"📁 {cat}", expanded=True):
+                # Liste existante
+                fichiers_cat = [f for f in c_edit.fichiers if f.categorie == cat]
+                if fichiers_cat:
+                    for f in fichiers_cat:
+                        c1, c2, c3 = st.columns([4, 2, 1])
+                        c1.text(f"📄 {f.nom_fichier}")
+                        c2.markdown(f"[Voir]({f.url_public})")
+                        if c3.button("❌", key=f"d_{f.id}"):
+                            supprimer_un_fichier(f.id)
+                            st.session_state['refresh'] = True
+                            st.rerun()
+                else:
+                    st.caption("Vide")
+                
+                # Upload rapide pour cette catégorie
+                add_files = st.file_uploader(f"Ajouter dans {cat}", accept_multiple_files=True, key=f"add_{cat}")
+                if add_files:
+                    if st.button(f"Envoyer vers {cat}", key=f"btn_{cat}"):
+                        sauvegarder_fichiers(c_edit.id, add_files, cat)
+                        st.success("Envoyé !")
+                        st.session_state['refresh'] = True
+                        st.rerun()
+
+        st.divider()
+        if st.button("🗑 SUPPRIMER CLIENT", type="primary"):
+            supprimer_client_entier(c_edit.id)
+            st.session_state['refresh'] = True
+            st.rerun()
