@@ -81,35 +81,24 @@ def fetch_siret_data(siret):
 
 def get_geoportail_link(adresse):
     """
-    Génère un lien Géoportail robuste (Zoom 16 + Coordonnées arrondies).
+    Génère un lien de recherche Géoportail (Plus fiable que les coordonnées).
     """
     if not adresse:
         return None
-        
-    base_api = "https://api-adresse.data.gouv.fr/search/"
-    params = {"q": adresse, "limit": 1}
     
-    try:
-        r = requests.get(base_api, params=params)
-        data = r.json()
-        
-        if data.get("features"):
-            coords = data["features"][0]["geometry"]["coordinates"]
-            # On arrondit à 5 décimales pour éviter les URLs trop longues/buggées
-            lon = round(coords[0], 5)
-            lat = round(coords[1], 5)
-            
-            base_geo = "https://www.geoportail.gouv.fr/carte"
-            
-            # z=16 : Zoom de sécurité (Le niveau 17-19 plante souvent en zone rurale)
-            # l0 : Satellite (Fond)
-            # l1 : Cadastre (Par-dessus, transparence 75%)
-            # permalink=yes : Force le rechargement propre des couches
-            link = f"{base_geo}?c={lon},{lat}&z=16&l0=ORTHOIMAGERY.ORTHOPHOTOS(100)&l1=CADASTRALPARCELS.PARCELS(75)&permalink=yes"
-            return link
-    except:
-        return None
-    return None
+    # On nettoie l'adresse pour qu'elle passe bien dans une URL
+    # Ex: "10 rue de la paix" devient "10%20rue%20de%20la%20paix"
+    adresse_encodee = urllib.parse.quote(adresse)
+    
+    # URL de base de Géoportail
+    base_geo = "https://www.geoportail.gouv.fr/carte"
+    
+    # l0 = PHOTOS AERIENNES (Satellite)
+    # l1 = PARCELLES CADASTRALES (Cadastre)
+    # q = RECHERCHE (C'est ça la clé ! On lui demande de chercher l'adresse)
+    link = f"{base_geo}?l0=ORTHOIMAGERY.ORTHOPHOTOS(100)&l1=CADASTRALPARCELS.PARCELS(75)&q={adresse_encodee}&permalink=yes"
+    
+    return link
 
 def ajouter_client(data, fichiers_uploades):
     caract_remplies = {k: v for k, v in data['caracteristiques'].items() if v}
