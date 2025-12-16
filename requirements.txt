@@ -3,4 +3,8 @@ sqlalchemy
 pandas
 requests
 supabase
+
 psycopg2-binary
+
+pypdf
+Pillow
