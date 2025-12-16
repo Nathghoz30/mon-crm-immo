@@ -81,12 +81,12 @@ def fetch_siret_data(siret):
 
 def get_geoportail_link(adresse):
     """
-    Génère un lien Géoportail FIABLE (Zoom de sécurité 15).
+    Génère un lien vers le Géoportail de l'Urbanisme (Beaucoup plus stable pour le cadastre).
     """
     if not adresse:
         return None
     
-    # 1. On demande à l'API Adresse officielle où se trouve le texte saisi
+    # 1. API Adresse (BAN)
     base_api = "https://api-adresse.data.gouv.fr/search/"
     params = {"q": adresse, "limit": 1}
     
@@ -94,29 +94,26 @@ def get_geoportail_link(adresse):
         r = requests.get(base_api, params=params)
         data = r.json()
         
-        # Si l'adresse existe
         if data.get("features"):
             coords = data["features"][0]["geometry"]["coordinates"]
-            # coords est une liste [Longitude, Latitude]
+            # L'API renvoie [Longitude, Latitude]
             lon = coords[0]
             lat = coords[1]
             
-            # 2. Construction URL Géoportail
-            base_geo = "https://www.geoportail.gouv.fr/carte"
+            # 2. Construction URL Géoportail de l'Urbanisme
+            # C'est le visualiseur PRO : il ne plante pas sur les coordonnées.
+            # tile=1 : Fond de plan (Plan IGN/Cadastre)
+            # zoom=17 : Zoom niveau parcelle
+            base_url = "https://www.geoportail-urbanisme.gouv.fr/map/"
             
-            # --- REGLAGES CRITIQUES ---
-            # c = Coordonnées (Longitude, Latitude)
-            # z = 15 -> C'est LE niveau de zoom qui ne plante jamais (vue quartier). 
-            #           Le niveau 17-19 crée l'écran gris si la zone est mal couverte.
-            # l0 = Satellite (ORTHOIMAGERY.ORTHOPHOTOS) à 100%
-            # l1 = Cadastre (CADASTRALPARCELS.PARCELS) à 75%
+            # On force le point comme séparateur décimal pour être sûr
+            slon = str(lon).replace(',', '.')
+            slat = str(lat).replace(',', '.')
             
-            link = f"{base_geo}?c={lon},{lat}&z=15&l0=ORTHOIMAGERY.ORTHOPHOTOS(100)&l1=CADASTRALPARCELS.PARCELS(75)&permalink=yes"
+            link = f"{base_url}#tile=1&lon={slon}&lat={slat}&zoom=18"
             return link
-    except Exception as e:
-        # En cas d'erreur technique (pas de internet, api down), on ne fait rien
+    except:
         return None
-    
     return None
 
 def ajouter_client(data, fichiers_uploades):
