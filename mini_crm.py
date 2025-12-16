@@ -81,24 +81,43 @@ def fetch_siret_data(siret):
 
 def get_geoportail_link(adresse):
     """
-    Génère un lien de recherche Géoportail (Plus fiable que les coordonnées).
+    Génère un lien Géoportail FIABLE (Zoom de sécurité 15).
     """
     if not adresse:
         return None
     
-    # On nettoie l'adresse pour qu'elle passe bien dans une URL
-    # Ex: "10 rue de la paix" devient "10%20rue%20de%20la%20paix"
-    adresse_encodee = urllib.parse.quote(adresse)
+    # 1. On demande à l'API Adresse officielle où se trouve le texte saisi
+    base_api = "https://api-adresse.data.gouv.fr/search/"
+    params = {"q": adresse, "limit": 1}
     
-    # URL de base de Géoportail
-    base_geo = "https://www.geoportail.gouv.fr/carte"
+    try:
+        r = requests.get(base_api, params=params)
+        data = r.json()
+        
+        # Si l'adresse existe
+        if data.get("features"):
+            coords = data["features"][0]["geometry"]["coordinates"]
+            # coords est une liste [Longitude, Latitude]
+            lon = coords[0]
+            lat = coords[1]
+            
+            # 2. Construction URL Géoportail
+            base_geo = "https://www.geoportail.gouv.fr/carte"
+            
+            # --- REGLAGES CRITIQUES ---
+            # c = Coordonnées (Longitude, Latitude)
+            # z = 15 -> C'est LE niveau de zoom qui ne plante jamais (vue quartier). 
+            #           Le niveau 17-19 crée l'écran gris si la zone est mal couverte.
+            # l0 = Satellite (ORTHOIMAGERY.ORTHOPHOTOS) à 100%
+            # l1 = Cadastre (CADASTRALPARCELS.PARCELS) à 75%
+            
+            link = f"{base_geo}?c={lon},{lat}&z=15&l0=ORTHOIMAGERY.ORTHOPHOTOS(100)&l1=CADASTRALPARCELS.PARCELS(75)&permalink=yes"
+            return link
+    except Exception as e:
+        # En cas d'erreur technique (pas de internet, api down), on ne fait rien
+        return None
     
-    # l0 = PHOTOS AERIENNES (Satellite)
-    # l1 = PARCELLES CADASTRALES (Cadastre)
-    # q = RECHERCHE (C'est ça la clé ! On lui demande de chercher l'adresse)
-    link = f"{base_geo}?l0=ORTHOIMAGERY.ORTHOPHOTOS(100)&l1=CADASTRALPARCELS.PARCELS(75)&q={adresse_encodee}&permalink=yes"
-    
-    return link
+    return None
 
 def ajouter_client(data, fichiers_uploades):
     caract_remplies = {k: v for k, v in data['caracteristiques'].items() if v}
