@@ -75,7 +75,6 @@ def fetch_siret_data(siret):
     return None
 
 def clean_filename(text):
-    """Retire accents et espaces pour éviter les erreurs Supabase"""
     text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
     return text.replace(" ", "_").replace("/", "-")
 
@@ -122,7 +121,6 @@ def supprimer_un_fichier(fichier_id):
         session.commit()
 
 def supprimer_categorie_entiere(client_id, categorie):
-    """Supprime tous les fichiers d'une catégorie spécifique pour un client"""
     fichiers = session.query(FichierClientModel).filter_by(client_id=client_id, categorie=categorie).all()
     if fichiers:
         paths = [f.path_storage for f in fichiers]
@@ -142,7 +140,6 @@ def supprimer_client_entier(client_id):
         session.delete(client)
         session.commit()
 
-# --- LOGIQUE DE FUSION PDF ---
 def generer_pdf_fusionne(client_id):
     client = session.query(ClientModel).get(client_id)
     if not client: return None
@@ -261,8 +258,9 @@ def is_valid_email(email_str):
     return bool(re.match(r"[^@]+@[^@]+\.[^@]+", email_str))
 
 # --- INTERFACE ---
-st.set_page_config(page_title="CRM V18 - Complet", layout="wide")
+st.set_page_config(page_title="CRM V19 - Auto Clear", layout="wide")
 if 'reset_needed' not in st.session_state: st.session_state['reset_needed'] = False
+if 'uploader_key' not in st.session_state: st.session_state['uploader_key'] = 0
 clear_form_logic() 
 
 with st.sidebar:
@@ -301,10 +299,12 @@ with st.sidebar:
     st.divider()
     
     st.subheader("5. Fichiers (Catégories)")
-    up_devis = st.file_uploader("1. Devis Signé", accept_multiple_files=True, key="up_devis")
-    up_geo = st.file_uploader("2. Captures Géoportail", accept_multiple_files=True, key="up_geo")
-    up_photos = st.file_uploader("3. Photos Local/Bâtiment", accept_multiple_files=True, key="up_photos")
-    up_supp = st.file_uploader("4. Pièces Supplémentaires", accept_multiple_files=True, key="up_supp")
+    # UPLOADERS AVEC CLE DYNAMIQUE POUR LE RESET
+    uk = st.session_state['uploader_key']
+    up_devis = st.file_uploader("1. Devis Signé", accept_multiple_files=True, key=f"up_devis_{uk}")
+    up_geo = st.file_uploader("2. Captures Géoportail", accept_multiple_files=True, key=f"up_geo_{uk}")
+    up_photos = st.file_uploader("3. Photos Local/Bâtiment", accept_multiple_files=True, key=f"up_photos_{uk}")
+    up_supp = st.file_uploader("4. Pièces Supplémentaires", accept_multiple_files=True, key=f"up_supp_{uk}")
 
     if st.button("✅ Enregistrer la fiche", type="primary"):
         nom_in = st.session_state.get("w_nom")
@@ -334,6 +334,7 @@ with st.sidebar:
             
             ajouter_client(data_client, uploads_dict)
             st.session_state['reset_needed'] = True
+            st.session_state['uploader_key'] += 1 # On change la clé pour vider les champs
             st.success("Sauvegardé !")
             st.session_state['refresh'] = True
             st.rerun()
@@ -374,13 +375,12 @@ with tab2:
                 e_kbis = st.text_input("Adresse Siège", value=c_edit.adresse_kbis or "")
                 e_trav = st.text_input("Adresse Travaux", value=c_edit.adresse_travaux or "")
                 
-                # --- RECUPERATION DONNEES TECHNIQUES (JSON) ---
+                # DATA TECHNIQUE
                 caracs_edit = {}
                 if c_edit.caracteristiques_json:
                     try: caracs_edit = json.loads(c_edit.caracteristiques_json)
                     except: pass
                 
-                # Valeurs par défaut sécurisées
                 def get_float(k):
                     try: return float(caracs_edit.get(k, 0))
                     except: return 0.0
@@ -407,7 +407,6 @@ with tab2:
                     c_edit.adresse_travaux = e_trav; c_edit.note = e_note
                     c_edit.nb_eclairage = str(e_nb); c_edit.nb_leds_preconise = str(e_nb_led)
                     
-                    # Reconstitution du JSON Technique
                     new_caracs = {
                         "Superficie (m²)": str(e_surf) if e_surf else "",
                         "Hauteur (m)": str(e_haut) if e_haut else "",
@@ -444,6 +443,7 @@ with tab2:
 
         # AFFICHAGE PAR CATEGORIES
         categories_ordre = ["Devis Signé", "Captures Géoportail", "Photos Local", "Pièces Supplémentaires"]
+        uk = st.session_state['uploader_key'] # Recup clé dynamique
         
         for cat in categories_ordre:
             # HEADER AVEC BOUTON SUPPRIMER TOUT
@@ -469,11 +469,12 @@ with tab2:
                 else:
                     st.caption("Aucun fichier.")
                 
-                # Upload rapide
-                add_files = st.file_uploader(f"Ajouter dans {cat}", accept_multiple_files=True, key=f"add_{cat}")
+                # Upload rapide avec CLÉ DYNAMIQUE pour vidage auto
+                add_files = st.file_uploader(f"Ajouter dans {cat}", accept_multiple_files=True, key=f"add_{cat}_{uk}")
                 if add_files:
                     if st.button(f"Envoyer vers {cat}", key=f"btn_{cat}"):
                         sauvegarder_fichiers(c_edit.id, add_files, cat)
+                        st.session_state['uploader_key'] += 1 # On vide les champs
                         st.success("Envoyé !")
                         st.session_state['refresh'] = True
                         st.rerun()
