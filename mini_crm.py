@@ -81,13 +81,12 @@ def fetch_siret_data(siret):
 
 def get_geoportail_link(adresse):
     """
-    Génère un lien Géoportail centré sur l'adresse.
-    Couches : Orthophotos (Satellite) + Parcelles Cadastrales.
+    Génère un lien Géoportail (Zoom 17 pour éviter l'écran gris).
     """
     if not adresse:
         return None
         
-    # 1. Géocodage via API Adresse (BAN)
+    # 1. Géocodage
     base_api = "https://api-adresse.data.gouv.fr/search/"
     params = {"q": adresse, "limit": 1}
     
@@ -99,13 +98,13 @@ def get_geoportail_link(adresse):
             coords = data["features"][0]["geometry"]["coordinates"]
             lon, lat = coords[0], coords[1]
             
-            # 2. Construction URL Géoportail
-            # l0 = Layer 0 (Fond) : ORTHOIMAGERY.ORTHOPHOTOS (Satellite)
-            # l1 = Layer 1 (Dessus) : CADASTRALPARCELS.PARCELS (Cadastre)
-            # opacity=1 -> 100%, opacity=0.7 -> 70%
+            # 2. Construction URL Géoportail (Correction Zoom 19 -> 17)
             base_geo = "https://www.geoportail.gouv.fr/carte"
-            # Syntaxe URL Géoportail : ?c=Lon,Lat&z=Zoom&l0=LAYER(opacity)&l1=LAYER(opacity)
-            link = f"{base_geo}?c={lon},{lat}&z=19&l0=ORTHOIMAGERY.ORTHOPHOTOS(100)&l1=CADASTRALPARCELS.PARCELS(100)&permalink=yes"
+            
+            # z=17 : Zoom niveau "Toiture/Maison" (Plus stable que 19)
+            # l0 : Satellite (100% opacité)
+            # l1 : Cadastre (75% opacité pour bien voir les limites jaunes sur la photo)
+            link = f"{base_geo}?c={lon},{lat}&z=17&l0=ORTHOIMAGERY.ORTHOPHOTOS(100)&l1=CADASTRALPARCELS.PARCELS(75)"
             return link
     except:
         return None
