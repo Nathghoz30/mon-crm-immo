@@ -1,0 +1,6 @@
+streamlit
+sqlalchemy
+pandas
+requests
+supabase
+psycopg2-binary
