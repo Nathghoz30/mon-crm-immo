@@ -75,8 +75,7 @@ def fetch_siret_data(siret):
     return None
 
 def clean_filename(text):
-    """Retire accents et espaces pour éviter les erreurs Supabase 'InvalidKey'"""
-    # Normalise le texte (ex: é -> e) et remplace les espaces par des _
+    """Retire accents et espaces pour éviter les erreurs Supabase"""
     text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
     return text.replace(" ", "_").replace("/", "-")
 
@@ -98,29 +97,18 @@ def ajouter_client(data, uploads_dict):
             sauvegarder_fichiers(nouveau.id, files, cat)
 
 def sauvegarder_fichiers(client_id, liste_fichiers, categorie):
-    # 1. On nettoie le nom de la catégorie pour le chemin (Cloud)
     cat_clean = clean_filename(categorie)
-    
     for fichier in liste_fichiers:
-        # 2. On nettoie le nom du fichier aussi
         nom_fic_clean = clean_filename(fichier.name)
-        
-        # Chemin propre (sans accents)
         file_path = f"{client_id}/{cat_clean}_{nom_fic_clean}"
-        
         try:
             fichier.seek(0)
             file_bytes = fichier.read()
             supabase.storage.from_(BUCKET_NAME).upload(path=file_path, file=file_bytes, file_options={"content-type": fichier.type, "x-upsert": "true"})
             public_url = supabase.storage.from_(BUCKET_NAME).get_public_url(file_path)
-            
-            # En base de données, on garde la "Vraie" catégorie avec accents
             session.add(FichierClientModel(
-                client_id=client_id, 
-                nom_fichier=fichier.name, 
-                categorie=categorie, # Ici on garde "Devis Signé"
-                path_storage=file_path, # Ici on a "Devis_Signe"
-                url_public=public_url
+                client_id=client_id, nom_fichier=fichier.name, categorie=categorie,
+                path_storage=file_path, url_public=public_url
             ))
         except Exception as e: st.error(f"Erreur upload {fichier.name}: {str(e)}")
     session.commit()
@@ -131,6 +119,17 @@ def supprimer_un_fichier(fichier_id):
         try: supabase.storage.from_(BUCKET_NAME).remove([fichier.path_storage])
         except: pass
         session.delete(fichier)
+        session.commit()
+
+def supprimer_categorie_entiere(client_id, categorie):
+    """Supprime tous les fichiers d'une catégorie spécifique pour un client"""
+    fichiers = session.query(FichierClientModel).filter_by(client_id=client_id, categorie=categorie).all()
+    if fichiers:
+        paths = [f.path_storage for f in fichiers]
+        try: supabase.storage.from_(BUCKET_NAME).remove(paths)
+        except: pass
+        for f in fichiers:
+            session.delete(f)
         session.commit()
 
 def supprimer_client_entier(client_id):
@@ -149,7 +148,6 @@ def generer_pdf_fusionne(client_id):
     if not client: return None
 
     files_to_merge = []
-    # Ordre strict pour le PDF final
     ordre_logique = ["Devis Signé", "Captures Géoportail", "Photos Local", "Pièces Supplémentaires"]
     
     for cat in ordre_logique:
@@ -164,7 +162,6 @@ def generer_pdf_fusionne(client_id):
     if not files_to_merge: return None
 
     merger = PdfWriter()
-    
     for name, file_bytes in files_to_merge:
         is_pdf = name.lower().endswith('.pdf')
         is_img = name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))
@@ -264,7 +261,7 @@ def is_valid_email(email_str):
     return bool(re.match(r"[^@]+@[^@]+\.[^@]+", email_str))
 
 # --- INTERFACE ---
-st.set_page_config(page_title="CRM V17.1 - Correctif Accents", layout="wide")
+st.set_page_config(page_title="CRM V18 - Complet", layout="wide")
 if 'reset_needed' not in st.session_state: st.session_state['reset_needed'] = False
 clear_form_logic() 
 
@@ -376,12 +373,49 @@ with tab2:
                 e_siret = st.text_input("SIRET", value=c_edit.siret or "")
                 e_kbis = st.text_input("Adresse Siège", value=c_edit.adresse_kbis or "")
                 e_trav = st.text_input("Adresse Travaux", value=c_edit.adresse_travaux or "")
+                
+                # --- RECUPERATION DONNEES TECHNIQUES (JSON) ---
+                caracs_edit = {}
+                if c_edit.caracteristiques_json:
+                    try: caracs_edit = json.loads(c_edit.caracteristiques_json)
+                    except: pass
+                
+                # Valeurs par défaut sécurisées
+                def get_float(k):
+                    try: return float(caracs_edit.get(k, 0))
+                    except: return 0.0
+                def get_int(k):
+                    try: return int(float(k))
+                    except: return 0
+                
+                st.subheader("Technique & Comptage")
+                c_tech1, c_tech2 = st.columns(2)
+                e_surf = c_tech1.number_input("Superficie (m²)", value=get_float("Superficie (m²)"), step=1.0)
+                e_haut = c_tech2.number_input("Hauteur (m)", value=get_float("Hauteur (m)"), step=0.1)
+                e_type = st.text_input("Type Éclairage", value=caracs_edit.get("Type Éclairage", ""))
+                e_puis = st.number_input("Puissance (W)", value=int(float(caracs_edit.get("Puissance (W)", 0))), step=1)
+                
+                c_cpt1, c_cpt2 = st.columns(2)
+                e_nb = c_cpt1.number_input("Nb Actuel", value=get_int(c_edit.nb_eclairage))
+                e_nb_led = c_cpt2.number_input("Nb LEDs Préco", value=get_int(c_edit.nb_leds_preconise))
+
                 e_note = st.text_area("Note", value=c_edit.note or "")
                 
                 if st.form_submit_button("💾 Mettre à jour"):
                     c_edit.nom = e_nom; c_edit.prenom = e_pre; c_edit.email = e_email; c_edit.telephone = e_tel
                     c_edit.entreprise = e_ent; c_edit.siret = e_siret; c_edit.adresse_kbis = e_kbis
                     c_edit.adresse_travaux = e_trav; c_edit.note = e_note
+                    c_edit.nb_eclairage = str(e_nb); c_edit.nb_leds_preconise = str(e_nb_led)
+                    
+                    # Reconstitution du JSON Technique
+                    new_caracs = {
+                        "Superficie (m²)": str(e_surf) if e_surf else "",
+                        "Hauteur (m)": str(e_haut) if e_haut else "",
+                        "Type Éclairage": e_type,
+                        "Puissance (W)": str(e_puis) if e_puis else ""
+                    }
+                    c_edit.caracteristiques_json = json.dumps(new_caracs)
+                    
                     session.commit()
                     st.success("Mis à jour")
                     st.session_state['refresh'] = True
@@ -390,9 +424,7 @@ with tab2:
         st.divider()
         st.subheader("Fichiers & Fusion")
         
-        # VERIFICATION
         is_complet = verifier_categories_completes(c_edit.id)
-        
         if is_complet:
             st.success("🌟 Dossier complet ! (Devis + Géoportail + Photos présents)")
             if st.button("📑 GÉNÉRER ET TÉLÉCHARGER LE DOSSIER PDF COMPLET"):
@@ -406,15 +438,23 @@ with tab2:
                             mime="application/pdf"
                         )
                     else:
-                        st.error("Erreur lors de la génération. Vérifiez que les fichiers sont bien des PDF ou Images valides.")
+                        st.error("Erreur génération PDF.")
         else:
-            st.info("💡 Pour activer la fusion PDF, il faut au moins un fichier dans : Devis, Géoportail et Photos.")
+            st.info("💡 Dossier incomplet pour la fusion (Manque Devis, Géoportail ou Photos).")
 
         # AFFICHAGE PAR CATEGORIES
         categories_ordre = ["Devis Signé", "Captures Géoportail", "Photos Local", "Pièces Supplémentaires"]
         
         for cat in categories_ordre:
-            with st.expander(f"📁 {cat}", expanded=True):
+            # HEADER AVEC BOUTON SUPPRIMER TOUT
+            col_titre, col_del_all = st.columns([4, 1])
+            col_titre.markdown(f"### 📁 {cat}")
+            if col_del_all.button("🗑 Tout supprimer", key=f"del_cat_{cat}", help=f"Supprime tous les fichiers de {cat}"):
+                 supprimer_categorie_entiere(c_edit.id, cat)
+                 st.session_state['refresh'] = True
+                 st.rerun()
+
+            with st.expander(f"Voir/Ajouter fichiers dans {cat}", expanded=True):
                 # Liste existante
                 fichiers_cat = [f for f in c_edit.fichiers if f.categorie == cat]
                 if fichiers_cat:
@@ -427,9 +467,9 @@ with tab2:
                             st.session_state['refresh'] = True
                             st.rerun()
                 else:
-                    st.caption("Vide")
+                    st.caption("Aucun fichier.")
                 
-                # Upload rapide pour cette catégorie
+                # Upload rapide
                 add_files = st.file_uploader(f"Ajouter dans {cat}", accept_multiple_files=True, key=f"add_{cat}")
                 if add_files:
                     if st.button(f"Envoyer vers {cat}", key=f"btn_{cat}"):
