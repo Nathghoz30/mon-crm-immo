@@ -5,32 +5,29 @@ import pandas as pd
 import json
 import requests
 import re
-from supabase import create_client, Client # Nouvelle librairie
+import urllib.parse # Pour encoder l'adresse proprement
+from supabase import create_client, Client
 
 # --- CONFIGURATION SUPABASE & DB ---
 
-# Récupération des secrets (depuis .streamlit/secrets.toml ou Streamlit Cloud Secrets)
 try:
     SUPABASE_URL = st.secrets["supabase"]["url"]
     SUPABASE_KEY = st.secrets["supabase"]["key"]
-    # IMPORTANT : SQLAlchemy a besoin que l'URL commence par postgresql://
-    # Si Supabase donne postgres://, on remplace par postgresql://
+    # Remplacement postgres:// par postgresql:// pour SQLAlchemy
     DATABASE_URL = st.secrets["supabase"]["db_url"].replace("postgres://", "postgresql://")
 except FileNotFoundError:
-    st.error("Fichier secrets.toml introuvable. Veuillez configurer vos identifiants Supabase.")
+    st.error("Fichier secrets.toml introuvable ou mal configuré.")
     st.stop()
 
-# Initialisation Client Supabase (pour les fichiers)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 BUCKET_NAME = "fichiers_clients"
 
-# Initialisation DB (SQLAlchemy connectée à PostgreSQL)
 engine = create_engine(DATABASE_URL, echo=False)
 Base = declarative_base()
 
-# --- MODÈLES DE DONNÉES (Identiques, compatible Postgres) ---
+# --- MODÈLES DE DONNÉES ---
 
-class ClientModel(Base): # Renommé pour éviter conflit avec Client de Supabase
+class ClientModel(Base):
     __tablename__ = 'clients'
     id = Column(Integer, primary_key=True)
     nom = Column(String) 
@@ -48,7 +45,6 @@ class ClientModel(Base): # Renommé pour éviter conflit avec Client de Supabase
     nb_leds_preconise = Column(String, nullable=True)
     
     caracteristiques_json = Column(Text, nullable=True)
-    # Relation
     fichiers = relationship("FichierClientModel", back_populates="client", cascade="all, delete-orphan")
 
 class FichierClientModel(Base):
@@ -56,12 +52,10 @@ class FichierClientModel(Base):
     id = Column(Integer, primary_key=True)
     client_id = Column(Integer, ForeignKey('clients.id'))
     nom_fichier = Column(String)
-    path_storage = Column(String) # On stocke le chemin Cloud au lieu du chemin local
-    url_public = Column(String)   # URL pour télécharger
-    
+    path_storage = Column(String)
+    url_public = Column(String)
     client = relationship("ClientModel", back_populates="fichiers")
 
-# Création des tables si elles n'existent pas (Automatique sur Postgres aussi !)
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 session = Session()
@@ -85,6 +79,38 @@ def fetch_siret_data(siret):
     except: return None
     return None
 
+def get_geoportail_link(adresse):
+    """
+    Génère un lien Géoportail centré sur l'adresse.
+    Couches : Orthophotos (Satellite) + Parcelles Cadastrales.
+    """
+    if not adresse:
+        return None
+        
+    # 1. Géocodage via API Adresse (BAN)
+    base_api = "https://api-adresse.data.gouv.fr/search/"
+    params = {"q": adresse, "limit": 1}
+    
+    try:
+        r = requests.get(base_api, params=params)
+        data = r.json()
+        
+        if data.get("features"):
+            coords = data["features"][0]["geometry"]["coordinates"]
+            lon, lat = coords[0], coords[1]
+            
+            # 2. Construction URL Géoportail
+            # l0 = Layer 0 (Fond) : ORTHOIMAGERY.ORTHOPHOTOS (Satellite)
+            # l1 = Layer 1 (Dessus) : CADASTRALPARCELS.PARCELS (Cadastre)
+            # opacity=1 -> 100%, opacity=0.7 -> 70%
+            base_geo = "https://www.geoportail.gouv.fr/carte"
+            # Syntaxe URL Géoportail : ?c=Lon,Lat&z=Zoom&l0=LAYER(opacity)&l1=LAYER(opacity)
+            link = f"{base_geo}?c={lon},{lat}&z=19&l0=ORTHOIMAGERY.ORTHOPHOTOS(100)&l1=CADASTRALPARCELS.PARCELS(100)&permalink=yes"
+            return link
+    except:
+        return None
+    return None
+
 def ajouter_client(data, fichiers_uploades):
     caract_remplies = {k: v for k, v in data['caracteristiques'].items() if v}
     caract_json = json.dumps(caract_remplies) if caract_remplies else None
@@ -105,20 +131,15 @@ def ajouter_client(data, fichiers_uploades):
         caracteristiques_json=caract_json
     )
     session.add(nouveau)
-    session.commit() # Commit pour avoir l'ID
+    session.commit()
     
     if fichiers_uploades:
         sauvegarder_fichiers(nouveau.id, fichiers_uploades)
 
 def sauvegarder_fichiers(client_id, liste_fichiers):
-    """Upload vers Supabase Storage"""
     for fichier in liste_fichiers:
-        # Chemin unique : ID_CLIENT/NOM_FICHIER
         file_path = f"{client_id}/{fichier.name}"
-        
-        # 1. Upload du fichier binaire
         try:
-            # On rembobine le fichier uploadé par Streamlit
             fichier.seek(0)
             file_bytes = fichier.read()
             supabase.storage.from_(BUCKET_NAME).upload(
@@ -126,11 +147,7 @@ def sauvegarder_fichiers(client_id, liste_fichiers):
                 file=file_bytes,
                 file_options={"content-type": fichier.type, "x-upsert": "true"}
             )
-            
-            # 2. Récupérer l'URL publique
             public_url = supabase.storage.from_(BUCKET_NAME).get_public_url(file_path)
-            
-            # 3. Enregistrer en base
             db_f = FichierClientModel(
                 client_id=client_id, 
                 nom_fichier=fichier.name, 
@@ -138,39 +155,30 @@ def sauvegarder_fichiers(client_id, liste_fichiers):
                 url_public=public_url
             )
             session.add(db_f)
-            
         except Exception as e:
             st.error(f"Erreur upload {fichier.name}: {str(e)}")
-            
     session.commit()
 
 def supprimer_un_fichier(fichier_id):
     fichier = session.query(FichierClientModel).get(fichier_id)
     if fichier:
-        # Suppression du Cloud
         try:
             supabase.storage.from_(BUCKET_NAME).remove([fichier.path_storage])
         except Exception as e:
             print(f"Erreur suppression cloud: {e}")
-            
-        # Suppression de la base
         session.delete(fichier)
         session.commit()
 
 def supprimer_client_entier(client_id):
     client = session.query(ClientModel).get(client_id)
     if client:
-        # Supabase ne permet pas de supprimer un "dossier" directement facilement via SDK parfois,
-        # mais on peut lister les fichiers. Ici on boucle sur les fichiers connus en DB.
         fichiers = client.fichiers
         paths_to_remove = [f.path_storage for f in fichiers]
-        
         if paths_to_remove:
             try:
                 supabase.storage.from_(BUCKET_NAME).remove(paths_to_remove)
             except Exception as e:
-                print(f"Erreur suppression groupe fichiers: {e}")
-
+                print(f"Erreur suppression fichiers: {e}")
         session.delete(client)
         session.commit()
 
@@ -226,7 +234,6 @@ def update_from_editor():
                     session.commit()
     st.session_state['refresh'] = True
 
-# --- LOGIQUE NETTOYAGE ---
 def clear_form_logic():
     if st.session_state.get('reset_needed'):
         text_keys = ["w_nom", "w_prenom", "w_email", "w_tel", "w_note", "w_siret_input", 
@@ -274,7 +281,7 @@ def is_valid_email(email_str):
 
 # --- INTERFACE ---
 
-st.set_page_config(page_title="CRM Cloud - Supabase", layout="wide")
+st.set_page_config(page_title="CRM V13 - Geoportail", layout="wide")
 
 if 'reset_needed' not in st.session_state: st.session_state['reset_needed'] = False
 clear_form_logic() 
@@ -287,8 +294,8 @@ with st.sidebar:
     c_nom, c_prenom = st.columns(2)
     c_nom.text_input("Nom *", key="w_nom")
     c_prenom.text_input("Prénom", key="w_prenom")
-    st.text_input("Mail", key="w_email", help="Ex: nom@domaine.com")
-    st.text_input("Téléphone", key="w_tel", help="06... ou +33...")
+    st.text_input("Mail", key="w_email")
+    st.text_input("Téléphone", key="w_tel")
     st.text_area("Note (Interne)", key="w_note", height=80)
     st.divider()
 
@@ -299,8 +306,21 @@ with st.sidebar:
     col_s1.text_input("Recherche SIRET", key="w_siret_input", label_visibility="collapsed", max_chars=14)
     col_s2.button("🔍", on_click=auto_fill_siret)
     st.text_input("Adresse Siège", key="w_kbis")
+    
     st.checkbox("Adresse travaux identique ?", key="w_checkbox_same", on_change=auto_copy_address)
-    st.text_input("Adresse Travaux", key="w_travaux")
+    
+    # --- ZONE ADRESSE TRAVAUX & GEOPORTAIL ---
+    addr_travaux = st.text_input("Adresse Travaux", key="w_travaux")
+    
+    # Bouton Geoportail Conditionnel (si adresse remplie)
+    if addr_travaux:
+        link_geo = get_geoportail_link(addr_travaux)
+        if link_geo:
+            st.link_button("🗺️ Voir Cadastre & Satellite", link_geo, help="Ouvre Géoportail centré sur l'adresse")
+        else:
+            st.caption("⚠️ Adresse non localisée pour le plan.")
+    # ----------------------------------------
+            
     st.text_input("SIRET Validé", key="w_siret_valide", max_chars=14)
     st.divider()
 
@@ -362,14 +382,13 @@ with st.sidebar:
             }
             ajouter_client(data_client, val_files)
             st.session_state['reset_needed'] = True
-            st.success("Sauvegardé sur le Cloud !")
+            st.success("Sauvegardé !")
             st.session_state['refresh'] = True
             st.rerun()
 
 # --- PRINCIPAL ---
 tab1, tab2 = st.tabs(["📊 Tableau de Bord", "📁 Gestion & Fichiers"])
 
-# TAB 1 : VUE GLOBALE
 with tab1:
     st.title("Suivi Clients (Cloud)")
     search = st.text_input("Filtrer le tableau...", placeholder="Nom, Ville, Entreprise...")
@@ -385,12 +404,10 @@ with tab1:
             )
         }
         colonnes_verrouillees = [c for c in df.columns if c != "Statut"]
-
         st.data_editor(df, column_config=col_conf, disabled=colonnes_verrouillees, hide_index=True, use_container_width=True, height=600, key="main_editor", on_change=update_from_editor)
     else:
-        st.info("Aucun client dans la base.")
+        st.info("Aucun client.")
 
-# TAB 2 : GESTION COMPLETE
 with tab2:
     st.header("Gestion Avancée")
     all_clients = session.query(ClientModel).all()
@@ -413,7 +430,12 @@ with tab2:
                 e_ent = st.text_input("Entreprise", value=c_edit.entreprise or "")
                 e_siret = st.text_input("SIRET", value=c_edit.siret or "", max_chars=14)
                 e_kbis = st.text_input("Adresse Siège", value=c_edit.adresse_kbis or "")
+                
+                # Ajout du bouton Geoportail aussi ici pour le mode Edit
                 e_trav = st.text_input("Adresse Travaux", value=c_edit.adresse_travaux or "")
+                if e_trav:
+                     # Lien calculé pour l'édition mais affiché en dehors du form pour être cliquable
+                     link_edit_geo = get_geoportail_link(e_trav)
                 
                 st.subheader("Technique")
                 def safe_int(val):
@@ -446,6 +468,10 @@ with tab2:
                         st.session_state['refresh'] = True
                         st.rerun()
 
+            # Affichage du bouton Geoportail Edit (hors du form pour éviter le reload intempestif)
+            if e_trav and link_edit_geo:
+                st.link_button("🗺️ Voir Cadastre (Adresse Travaux)", link_edit_geo)
+
         st.divider()
         col_fichiers, col_ajout = st.columns([1, 1])
         with col_fichiers:
@@ -454,7 +480,6 @@ with tab2:
                 for f in c_edit.fichiers:
                     c1, c2, c3 = st.columns([4, 2, 1])
                     c1.text(f"📄 {f.nom_fichier}")
-                    # Lien de téléchargement direct (Public URL Supabase)
                     c2.markdown(f"[⬇️ Ouvrir]({f.url_public})")
                     if c3.button("❌", key=f"del_{f.id}"):
                         supprimer_un_fichier(f.id)
